@@ -31,6 +31,8 @@ namespace Sensi
             this._password = Password;
         }
 
+        #region -- API Calls --
+
         private async Task<T> SendRequestAsync<T>(HttpMethod verb, string path, object req=null)
         {
             byte[] byteArray = new byte[0];
@@ -80,11 +82,7 @@ namespace Sensi
             }
             return result;
         }
-        public bool Ping()
-        {
-            var result = SendRequestAsync<PingResponse>(HttpMethod.Get, "realtime/ping").Result;
-            return result?.Response == "pong";
-        }
+
         public void Logout()
         {
             var result = SendRequestAsync<object>(HttpMethod.Delete, "api/authorize").Result;
@@ -117,6 +115,18 @@ namespace Sensi
         }
 
 
+
+
+        #endregion
+
+        #region -- Realtime Calls --
+
+        public bool Ping()
+        {
+            var result = SendRequestAsync<PingResponse>(HttpMethod.Get, "realtime/ping").Result;
+            return result?.Response == "pong";
+        }
+
         public async Task<NegotiateResponse> Negotiate()
         {
             var result = await SendRequestAsync<NegotiateResponse>(HttpMethod.Get, "realtime/negotiate");
@@ -125,5 +135,6 @@ namespace Sensi
         }
 
 
+        #endregion
     }
 }
