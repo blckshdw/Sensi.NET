@@ -24,8 +24,9 @@ namespace Sensi
         {
             this._cookieJar = new CookieContainer();
         }
-        public SensiConnection(string Username, string Password) : base()
+        public SensiConnection(string Username, string Password) 
         {
+            this._cookieJar = new CookieContainer();
             this._username = Username;
             this._password = Password;
         }
@@ -43,6 +44,7 @@ namespace Sensi
             webRequest.Method = verb.Method;
             webRequest.ContentType = "application/json";
             webRequest.ContentLength = byteArray.Length;
+            webRequest.Headers.Add("X-Requested-With", "XMLHttpRequest");
 
             if (verb != HttpMethod.Get && req != null)
             {
@@ -60,7 +62,7 @@ namespace Sensi
                     var reader = new StreamReader(responseStream, Encoding.UTF8);
                     var responseString = reader.ReadToEnd();
                     var result = JsonConvert.DeserializeObject<T>(responseString);
-
+                    
                     return result;
                 }
             }
@@ -78,6 +80,50 @@ namespace Sensi
             }
             return result;
         }
+        public bool Ping()
+        {
+            var result = SendRequestAsync<PingResponse>(HttpMethod.Get, "realtime/ping").Result;
+            return result?.Response == "pong";
+        }
+        public void Logout()
+        {
+            var result = SendRequestAsync<object>(HttpMethod.Delete, "api/authorize").Result;
+            return;
+        }
+
+        public async Task<Contractor> GetContractor(int id)
+        {
+            var result = await SendRequestAsync<Contractor>(HttpMethod.Get, "api/contractors/"+id);
+            return result;
+        }
+
+
+        public async Task<Dictionary<string,string>> GetTimeZones(string countryCode)
+        {
+            var result = await SendRequestAsync<Dictionary<string,string>>(HttpMethod.Get, "api/timezones/"+countryCode);
+            return result;
+        }
+
+        public async Task<IEnumerable<Thermostat>> ListThermostats()
+        {
+            var result = await SendRequestAsync<IEnumerable<Thermostat>>(HttpMethod.Get, "api/thermostats");
+            return result;
+        }
+
+        public async Task<WeatherResponse> GetWeatherAsync(string icd)
+        {
+            var result = await SendRequestAsync<WeatherResponse>(HttpMethod.Get, "api/weather/" + icd);
+            return result;
+        }
+
+
+        public async Task<NegotiateResponse> Negotiate()
+        {
+            var result = await SendRequestAsync<NegotiateResponse>(HttpMethod.Get, "realtime/negotiate");
+            this._token = result.ConnectionToken;
+            return result;
+        }
+
 
     }
 }
