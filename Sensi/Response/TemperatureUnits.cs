@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 
 namespace Sensi.Response
 {
-    public class TemperatureUnits
+    public class Temperature
     {
         public int F { get; set; }
         public int C { get; set; }

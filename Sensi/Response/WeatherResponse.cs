@@ -18,9 +18,9 @@ namespace Sensi.Response
     {
         public string Condition { get; set; }
         public int ConditionId { get; set; }
-        public TemperatureUnits CurrentTemp { get; set; }
-        public TemperatureUnits HighTemp { get; set; }
-        public TemperatureUnits LowTemp { get; set; }
+        public Temperature CurrentTemp { get; set; }
+        public Temperature HighTemp { get; set; }
+        public Temperature LowTemp { get; set; }
         public Location Location { get; set; }
     }
 }

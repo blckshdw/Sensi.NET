@@ -17,5 +17,10 @@ namespace Sensi
         public string TimeZone { get; set; }
         public string ZipCode { get; set; }
         public string Country { get; set; }
+
+        public override string ToString()
+        {
+            return this.DeviceName;
+        }
     }
 }
