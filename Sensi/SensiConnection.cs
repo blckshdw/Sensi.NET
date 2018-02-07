@@ -10,6 +10,8 @@ using System.Threading.Tasks;
 using Microsoft.AspNet.SignalR.Client;
 using Microsoft.AspNet.SignalR.Client.Hubs;
 using Microsoft.AspNet.SignalR.Client.Transports;
+using System.Diagnostics;
+using Sensi.EventArgs;
 
 namespace Sensi
 {
@@ -26,12 +28,99 @@ namespace Sensi
         private HubConnection _hubConnection;
         private IHubProxy _hubProxy;
 
+        public event EventHandler<ThermostatOnlineEventArgs> ThermostatOnline;
+        public event EventHandler<EnvironmentalControlsUpdatedEventArgs> EnvironmentalControlsUpdated;
+        public event EventHandler<OperationalStatusUpdatedEventArgs> OperationalStatusUpdated;
+        public event EventHandler<CapabilitiesUpdatedEventArgs> CapabilitiesUpdated;
+        public event EventHandler<SettingsUpdatedEventArgs> SettingsUpdated;
+        public event EventHandler<ProductUpdatedEventArgs> ProductUpdated;
+        
         public SensiConnection()
         {
+            Trace.WriteLine("SensiConnection ctor");
+
             this._cookieJar = new CookieContainer();
             this._hubConnection = new HubConnection(_urlBase + "realtime", false);
             this._hubConnection.CookieContainer = this._cookieJar;
             this._hubProxy = this._hubConnection.CreateHubProxy("thermostat-v1");
+
+            this._hubConnection.StateChanged += (state) =>
+            {
+                Debug.WriteLine($"State Changed from {state.OldState} to {state.NewState}");
+            };
+            
+            this._hubConnection.ConnectionSlow += () => { Debug.WriteLine("Connection Slow"); };
+            this._hubConnection.Reconnected += () => { Debug.WriteLine("Reconnected"); };
+            this._hubConnection.Reconnecting += () => { Debug.WriteLine("Reconnecting"); };
+            this._hubConnection.Error += (ex) => { Trace.WriteLine(ex, "HubConnection Error");
+
+                if (ex is System.Net.WebException && ex.Message == "The remote server returned an error: (401) Unauthorized.")
+                {
+                    try
+                    {
+                        Trace.WriteLine("Attempting Reauth");
+                        this.Authorize().Wait();
+                        this.Negotiate().Wait();
+                    } catch (Exception ex2) { Trace.WriteLine(ex2); }
+                }
+            };
+            
+            this._hubConnection.Received += (data) => { Debug.WriteLine("Data Received"); };
+
+            this._hubProxy.On<object>("initalized", (data) =>
+             {
+                 Trace.WriteLine(data, "Initalized");
+             });
+
+            this._hubProxy.On<object, object>("online", (icd, data) =>
+             {
+                 Trace.WriteLine(Environment.NewLine + data, $"Received Online Message for ICD [{icd}]");
+
+                 try
+                 {
+                     var msg = JsonConvert.DeserializeObject<OnlineResponse>(data.ToString());
+                     var args = (ThermostatOnlineEventArgs)msg;
+                     args.Icd = icd.ToString();
+
+                     ThermostatOnline?.Invoke(this, args);
+                 }
+                 catch (Exception ex)
+                 {
+                     Trace.WriteLine(ex);
+                 }
+             });
+
+            this._hubProxy.On<object, object>("update", (icd, data) =>
+            {
+                Trace.WriteLine(Environment.NewLine + data, $"Received Update Message for ICD [{icd}]");
+                
+                OnlineResponse msg = null;
+
+                try
+                {
+                    msg = JsonConvert.DeserializeObject<OnlineResponse>(data.ToString());
+                }
+                catch (Exception ex) { Trace.WriteLine(ex); }
+
+                if (msg != null)
+                {
+                    if (msg != null && msg.OperationalStatus != null)
+                        OperationalStatusUpdated?.Invoke(this, new OperationalStatusUpdatedEventArgs { Icd = icd.ToString(), OperationalStatus = msg.OperationalStatus });
+
+                    if (msg != null && msg.EnvironmentControls != null)
+                        EnvironmentalControlsUpdated?.Invoke(this, new EnvironmentalControlsUpdatedEventArgs { Icd = icd.ToString(), EnvironmentControls = msg.EnvironmentControls });
+
+                    if (msg != null && msg.Capabilities != null)
+                        CapabilitiesUpdated?.Invoke(this, new CapabilitiesUpdatedEventArgs { Icd = icd.ToString(), Capabilities = msg.Capabilities });
+
+                    if (msg != null && msg.Settings != null)
+                        SettingsUpdated?.Invoke(this, new SettingsUpdatedEventArgs { Icd = icd.ToString(), Settings = msg.Settings });
+
+                    if (msg != null && msg.Product != null)
+                        ProductUpdated?.Invoke(this, new ProductUpdatedEventArgs { Icd = icd.ToString(), Product = msg.Product });
+                }
+
+            });
         }
         public SensiConnection(string Username, string Password) : this()
         {
@@ -76,11 +165,11 @@ namespace Sensi
                     return result;
                 }
             }
-
         }
 
         public async Task<AuthorizeResponse> Authorize()
         {
+            Debug.WriteLine("Authorizing");
             var args = new { UserName = this._username, Password = this._password };
             var result = await SendRequestAsync<AuthorizeResponse>(HttpMethod.Post, "api/authorize", args);
             if (result != null)
@@ -110,9 +199,9 @@ namespace Sensi
             return result;
         }
 
-        public async Task<IEnumerable<Thermostat>> ListThermostats()
+        public async Task<IEnumerable<ThermostatResponse>> ListThermostats()
         {
-            var result = await SendRequestAsync<IEnumerable<Thermostat>>(HttpMethod.Get, "api/thermostats");
+            var result = await SendRequestAsync<IEnumerable<ThermostatResponse>>(HttpMethod.Get, "api/thermostats");
             return result;
         }
 
@@ -137,16 +226,45 @@ namespace Sensi
 
         public async Task<NegotiateResponse> Negotiate()
         {
+            Debug.WriteLine("Negotiate");
             var result = await SendRequestAsync<NegotiateResponse>(HttpMethod.Get, "realtime/negotiate");
             this._token = result.ConnectionToken;
             return result;
         }
 
-        public async Task BeginRealtime()
+        public async Task<bool> BeginRealtime()
         {
-            await _hubConnection.Start(new LongPollingTransport());
-        }
+            Trace.WriteLine("Starting Connect");
+            await this.Authorize();
+            await this.Negotiate();
 
+            bool isConnected = false;
+            await _hubConnection.Start(new LongPollingTransport());
+
+            if (_hubConnection.State == ConnectionState.Connected)
+            {
+                isConnected = true;
+                //_hubConnection.Closed += _hubConnection_Closed;
+                _hubConnection.Closed += () => { Debug.WriteLine("HubConnection Closed"); };
+            }
+
+            Trace.Write("HubConnection State is "+_hubConnection.State);
+            return isConnected;
+        }
+        /*
+        private async void _hubConnection_Closed()
+        {
+            TimeSpan retryDuration = TimeSpan.FromSeconds(30);
+
+            while (DateTime.UtcNow < DateTime.UtcNow.Add(retryDuration))
+            {
+                Trace.WriteLine("Attempting Reconnect");
+                bool connected = await BeginRealtime();
+                if (connected)
+                    return;
+            }
+        }
+        */
         public async Task Subscribe(string icd) => await _hubProxy.Invoke("Subscribe", icd);
         public async Task Unsubscribe(string icd) => await _hubProxy.Invoke("Unsubscribe", icd);
         public async Task ChangeSetting(string icd, string feature, string value) => await _hubProxy.Invoke("ChangeSetting", icd, feature, value);
@@ -171,6 +289,10 @@ namespace Sensi
         public async Task SetTemperatureOffset(string icd, int degrees) => await _hubProxy.Invoke("ChangeSetting", icd, "TemperatureOffset", degrees);
         public async Task SetHeatCycleRate(string icd, HeatCycleRate rate) => await _hubProxy.Invoke("ChangeSetting", icd, "HeatCycleRate", rate.ToString());
         public async Task SetComfortRecovery(string icd, Mode mode) => await _hubProxy.Invoke("ChangeSetting", icd, "ComfortRecovery", mode);
+
+        #endregion
+
+        #region -- Realtime Events -- 
 
         #endregion
     }
