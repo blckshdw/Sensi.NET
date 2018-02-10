@@ -24,6 +24,7 @@ namespace Sensi
 
         private string _username;
         private string _password;
+        private List<string> _subscriptions;
 
         private HubConnection _hubConnection;
         private IHubProxy _hubProxy;
@@ -34,7 +35,8 @@ namespace Sensi
         public event EventHandler<CapabilitiesUpdatedEventArgs> CapabilitiesUpdated;
         public event EventHandler<SettingsUpdatedEventArgs> SettingsUpdated;
         public event EventHandler<ProductUpdatedEventArgs> ProductUpdated;
-        
+        public DateTime LastUpdateReceived;
+
         public SensiConnection()
         {
             Trace.WriteLine("SensiConnection ctor");
@@ -43,28 +45,43 @@ namespace Sensi
             this._hubConnection = new HubConnection(_urlBase + "realtime", false);
             this._hubConnection.CookieContainer = this._cookieJar;
             this._hubProxy = this._hubConnection.CreateHubProxy("thermostat-v1");
+            this._subscriptions = new List<string>();
 
             this._hubConnection.StateChanged += (state) =>
             {
                 Debug.WriteLine($"State Changed from {state.OldState} to {state.NewState}");
             };
-            
+
             this._hubConnection.ConnectionSlow += () => { Debug.WriteLine("Connection Slow"); };
             this._hubConnection.Reconnected += () => { Debug.WriteLine("Reconnected"); };
             this._hubConnection.Reconnecting += () => { Debug.WriteLine("Reconnecting"); };
             this._hubConnection.Error += (ex) => { Trace.WriteLine(ex, "HubConnection Error");
 
-                if (ex is System.Net.WebException && ex.Message == "The remote server returned an error: (401) Unauthorized.")
+                if (ex is System.Net.WebException)
                 {
-                    try
+                    if (((System.Net.WebException)ex).Status == WebExceptionStatus.ProtocolError)
                     {
-                        Trace.WriteLine("Attempting Reauth");
-                        this.Authorize().Wait();
-                        this.Negotiate().Wait();
-                    } catch (Exception ex2) { Trace.WriteLine(ex2); }
+                        var response = ((System.Net.WebException)ex).Response as HttpWebResponse;
+                        if (response != null && response.StatusCode == HttpStatusCode.Unauthorized)
+                        {
+                            Trace.WriteLine("Attempting Reauth");
+                            this.Authorize().Wait();
+                            this.Negotiate().Wait();
+
+                            foreach (var sub in _subscriptions)
+                            {
+                                Trace.WriteLine("Attempt Re-Subscription for " + sub);
+                                this.Subscribe(sub).Wait();
+                            }
+                        }
+                        else
+                        {
+                            throw ex;
+                        }
+                    }
                 }
             };
-            
+
             this._hubConnection.Received += (data) => { Debug.WriteLine("Data Received"); };
 
             this._hubProxy.On<object>("initalized", (data) =>
@@ -75,6 +92,7 @@ namespace Sensi
             this._hubProxy.On<object, object>("online", (icd, data) =>
              {
                  Trace.WriteLine(Environment.NewLine + data, $"Received Online Message for ICD [{icd}]");
+                 this.LastUpdateReceived = DateTime.Now;
 
                  try
                  {
@@ -93,6 +111,7 @@ namespace Sensi
             this._hubProxy.On<object, object>("update", (icd, data) =>
             {
                 Trace.WriteLine(Environment.NewLine + data, $"Received Update Message for ICD [{icd}]");
+                this.LastUpdateReceived = DateTime.Now;
                 
                 OnlineResponse msg = null;
 
@@ -248,8 +267,13 @@ namespace Sensi
                 _hubConnection.Closed += () => { Debug.WriteLine("HubConnection Closed"); };
             }
 
-            Trace.Write("HubConnection State is "+_hubConnection.State);
+            Trace.Write("HubConnection State is " + _hubConnection.State);
             return isConnected;
+        }
+
+        public void StopRealtime()
+        {
+            _hubConnection.Stop();
         }
         /*
         private async void _hubConnection_Closed()
@@ -265,8 +289,19 @@ namespace Sensi
             }
         }
         */
-        public async Task Subscribe(string icd) => await _hubProxy.Invoke("Subscribe", icd);
-        public async Task Unsubscribe(string icd) => await _hubProxy.Invoke("Unsubscribe", icd);
+        public async Task Subscribe(string icd)
+        {
+            await _hubProxy.Invoke("Subscribe", icd);
+            if (!_subscriptions.Contains(icd))
+                _subscriptions.Add(icd);
+        }
+
+        public async Task Unsubscribe(string icd)
+        {
+            await _hubProxy.Invoke("Unsubscribe", icd);
+            if (_subscriptions.Contains(icd))
+                _subscriptions.Remove(icd);
+        }
         public async Task ChangeSetting(string icd, string feature, string value) => await _hubProxy.Invoke("ChangeSetting", icd, feature, value);
         public async Task SetHeat(string icd, int temp, TemperatureUnits unit) => await _hubProxy.Invoke("SetHeat", icd, temp, unit.GetTemperatureCode());
         public async Task SetAutoHeat(string icd, int temp, TemperatureUnits unit) => await _hubProxy.Invoke("SetAutoHeat", icd, temp, unit.GetTemperatureCode());
