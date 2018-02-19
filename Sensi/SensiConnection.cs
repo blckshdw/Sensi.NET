@@ -35,6 +35,7 @@ namespace Sensi
         public event EventHandler<CapabilitiesUpdatedEventArgs> CapabilitiesUpdated;
         public event EventHandler<SettingsUpdatedEventArgs> SettingsUpdated;
         public event EventHandler<ProductUpdatedEventArgs> ProductUpdated;
+        public event EventHandler HubConnectionClosed;
         public DateTime LastUpdateReceived;
 
         public SensiConnection()
@@ -55,31 +56,59 @@ namespace Sensi
             this._hubConnection.ConnectionSlow += () => { Debug.WriteLine("Connection Slow"); };
             this._hubConnection.Reconnected += () => { Debug.WriteLine("Reconnected"); };
             this._hubConnection.Reconnecting += () => { Debug.WriteLine("Reconnecting"); };
-            this._hubConnection.Error += (ex) => { Trace.WriteLine(ex, "HubConnection Error");
+            this._hubConnection.Error += async (ex) =>
+            {
+                Trace.WriteLine(ex, "HubConnection Error");
 
                 if (ex is System.Net.WebException)
                 {
                     if (((System.Net.WebException)ex).Status == WebExceptionStatus.ProtocolError)
                     {
                         var response = ((System.Net.WebException)ex).Response as HttpWebResponse;
-                        if (response != null && response.StatusCode == HttpStatusCode.Unauthorized)
+
+                        if (response != null && (
+                            response.StatusCode == HttpStatusCode.Unauthorized ||
+                            response.StatusCode == HttpStatusCode.InternalServerError)
+                            )
                         {
-                            Trace.WriteLine("Attempting Reauth");
-                            this.Authorize().Wait();
-                            this.Negotiate().Wait();
+                            Trace.WriteLine("Restarting Realtime due to WebExpection");
+
+                            while (await this.BeginRealtime() == false)
+                            {
+                                Trace.WriteLine("Not Connected, Delaying...");
+                                this.StopRealtime();
+                                await Task.Delay(5000);
+                            }
 
                             foreach (var sub in _subscriptions)
                             {
                                 Trace.WriteLine("Attempt Re-Subscription for " + sub);
                                 this.Subscribe(sub).Wait();
                             }
-                        }
-                        else
-                        {
-                            throw ex;
+                            return;
                         }
                     }
                 }
+                else if (ex is System.Net.Sockets.SocketException)
+                {
+                    Trace.WriteLine("Restarting Realtime due to SocketException");
+
+                    while (await this.BeginRealtime() == false)
+                    {
+                        Trace.WriteLine("Not Connected, Delaying...");
+                        this.StopRealtime();
+                        await Task.Delay(5000);
+                    }
+
+                    foreach (var sub in _subscriptions)
+                    {
+                        Trace.WriteLine("Attempt Re-Subscription for " + sub);
+                        this.Subscribe(sub).Wait();
+                    }
+                    return;
+
+                }
+
             };
 
             this._hubConnection.Received += (data) => { Debug.WriteLine("Data Received"); };
@@ -91,7 +120,8 @@ namespace Sensi
 
             this._hubProxy.On<object, object>("online", (icd, data) =>
              {
-                 Trace.WriteLine(Environment.NewLine + data, $"Received Online Message for ICD [{icd}]");
+                 //Trace.WriteLine(Environment.NewLine + data, $"Received Online Message for ICD [{icd}]");
+                 Trace.WriteLine($"Received Online Message for ICD [{icd}]");
                  this.LastUpdateReceived = DateTime.Now;
 
                  try
@@ -110,9 +140,10 @@ namespace Sensi
 
             this._hubProxy.On<object, object>("update", (icd, data) =>
             {
-                Trace.WriteLine(Environment.NewLine + data, $"Received Update Message for ICD [{icd}]");
+                //Trace.WriteLine(Environment.NewLine + data, $"Received Update Message for ICD [{icd}]");
+                Trace.WriteLine($"Received Update Message for ICD [{icd}]");
                 this.LastUpdateReceived = DateTime.Now;
-                
+
                 OnlineResponse msg = null;
 
                 try
@@ -140,6 +171,14 @@ namespace Sensi
                 }
 
             });
+
+            this._hubProxy.On<object, object>("offline", (icd, data) =>
+            {
+                //Trace.WriteLine(Environment.NewLine + data, $"Received Offline Message for ICD [{icd}]");
+                Trace.WriteLine($"Received Offline Message for ICD [{icd}]");
+                this.LastUpdateReceived = DateTime.Now;
+            });
+
         }
         public SensiConnection(string Username, string Password) : this()
         {
@@ -253,7 +292,7 @@ namespace Sensi
 
         public async Task<bool> BeginRealtime()
         {
-            Trace.WriteLine("Starting Connect");
+            Trace.WriteLine("Starting Hub Connect");
             await this.Authorize();
             await this.Negotiate();
 
@@ -264,15 +303,21 @@ namespace Sensi
             {
                 isConnected = true;
                 //_hubConnection.Closed += _hubConnection_Closed;
-                _hubConnection.Closed += () => { Debug.WriteLine("HubConnection Closed"); };
+                _hubConnection.Closed += () => {
+                    Debug.WriteLine("HubConnection Closed");
+
+                    if (HubConnectionClosed != null)
+                        HubConnectionClosed(this, new System.EventArgs());
+                };
             }
 
-            Trace.Write("HubConnection State is " + _hubConnection.State);
+            Trace.WriteLine("HubConnection State is " + _hubConnection.State);
             return isConnected;
         }
 
         public void StopRealtime()
         {
+            Trace.WriteLine("Stopping Realtime");
             _hubConnection.Stop();
         }
         /*
